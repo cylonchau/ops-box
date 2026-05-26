@@ -3,8 +3,8 @@
 # Runner script for hardng/op-scripts
 #
 
-GITHUB_USER="hardng"
-GITHUB_REPO="op-scripts"
+GITHUB_USER="cylonchau"
+GITHUB_REPO="ops-box"
 BRANCH="main"
 SCRIPTS_PATH="scripts"
 BASE_RAW_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${BRANCH}/${SCRIPTS_PATH}"
