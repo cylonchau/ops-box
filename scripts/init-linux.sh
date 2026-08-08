@@ -316,18 +316,47 @@ EOF
         fi
         ;;
       debian|ubuntu)
-        if ! systemctl list-unit-files | grep -q docker; then
-          curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/${SYSTEM_RELEASE}/gpg | apt-key add - || true
-          add-apt-repository -y "deb [arch=amd64] https://mirrors.aliyun.com/docker-ce/linux/${SYSTEM_RELEASE} $(lsb_release -cs) stable" || true
+        mkdir -p /etc/docker
+        if ! grep -q "https://docker.mirrors.ustc.edu.cn/" /etc/docker/daemon.json 2>/dev/null; then
+          cat > /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": ["https://docker.mirrors.ustc.edu.cn/"]
+}
+EOF
+        fi
+
+        if ! systemctl list-unit-files 2>/dev/null | grep -q docker; then
           apt-get update -y || true
-          apt-get install -y docker-ce || true
-          systemctl stop docker || true
-          systemctl disable docker || true
+          apt-get install -y ca-certificates curl gnupg || true
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/${SYSTEM_RELEASE}/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes 2>/dev/null || true
+
+          local codename=""
+          if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            codename="${VERSION_CODENAME:-${UBUNTU_CODENAME}}"
+          fi
+          [ -z "$codename" ] && command -v lsb_release >/dev/null 2>&1 && codename=$(lsb_release -cs)
+          [ -z "$codename" ] && codename="bookworm"
+
+          # Debian 13 (trixie) fallback to bookworm if trixie release is not yet in docker-ce mirror
+          if [ "$codename" = "trixie" ]; then
+            if ! curl -fsI "https://mirrors.aliyun.com/docker-ce/linux/debian/dists/trixie/Release" &>/dev/null; then
+              codename="bookworm"
+            fi
+          fi
+
+          local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+          echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/${SYSTEM_RELEASE} ${codename} stable" > /etc/apt/sources.list.d/docker.list
+          apt-get update -y || true
+          apt-get install -y docker-ce docker-ce-cli containerd.io || true
+          systemctl stop docker 2>/dev/null || true
+          systemctl disable docker 2>/dev/null || true
         else
-          if systemctl status docker | grep -q "active (running)"; then
-            systemctl stop docker.socket || true
-            systemctl stop docker || true
-            systemctl disable docker || true
+          if systemctl status docker 2>/dev/null | grep -q "active (running)"; then
+            systemctl stop docker.socket 2>/dev/null || true
+            systemctl stop docker 2>/dev/null || true
+            systemctl disable docker 2>/dev/null || true
           fi
         fi
         ;;
