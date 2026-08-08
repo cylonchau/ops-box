@@ -418,6 +418,7 @@ init_system_module() {
 }
 
 ensure_lvm_installed() {
+  modprobe dm_mod 2>/dev/null || true
   if ! command -v lvs &>/dev/null || ! command -v parted &>/dev/null || ! command -v mkfs.xfs &>/dev/null || ! command -v mkfs.ext4 &>/dev/null; then
     echo "[INFO] Installing lvm2, parted, xfsprogs, and e2fsprogs..."
     if [ "$OS_FAMILY" = "rhel" ]; then
@@ -438,8 +439,11 @@ ensure_lvm_installed() {
   fi
 
   # Activate all LVM volume groups and refresh devtmpfs nodes
+  modprobe dm_mod 2>/dev/null || true
   vgchange -ay 2>/dev/null || true
   vgmknodes 2>/dev/null || true
+  dmsetup mknodes 2>/dev/null || true
+  udevadm trigger --action=add 2>/dev/null || true
   udevadm settle 2>/dev/null || true
 }
 
