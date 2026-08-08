@@ -349,7 +349,7 @@ EOF
           local arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
           echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/${SYSTEM_RELEASE} ${codename} stable" > /etc/apt/sources.list.d/docker.list
           apt-get update -y || true
-          apt-get install -y docker-ce docker-ce-cli containerd.io || true
+          apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
           systemctl stop docker 2>/dev/null || true
           systemctl disable docker 2>/dev/null || true
         else
@@ -361,6 +361,15 @@ EOF
         fi
         ;;
     esac
+
+    # 为兼容旧版 docker-compose 命令，自动创建 /usr/local/bin/docker-compose 软链接
+    if ! command -v docker-compose &>/dev/null; then
+      if [ -f /usr/libexec/docker/cli-plugins/docker-compose ]; then
+        ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+      elif [ -f /usr/lib/docker/cli-plugins/docker-compose ]; then
+        ln -sf /usr/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+      fi
+    fi
   fi
 }
 
