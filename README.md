@@ -264,6 +264,30 @@
   curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- sg
   ```
 
+## global-speedtest
+
+* **安装环境与 CLI 工具**
+  ```bash
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest install
+  ```
+* **查询可用测速节点**
+  ```bash
+  # 查询当前机器附近的测速节点
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest list-nodes nearby
+  # 按指定国家或城市检索节点
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest list-nodes country "United States"
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest list-nodes city London
+  ```
+* **执行网络测速**
+  ```bash
+  # 测试附近节点带宽与延迟
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest speedtest nearby
+  # 指定节点 ID 发起测速
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest speedtest node <server-id>
+  # 按国家或区域节点发起测速
+  curl -sL https://raw.githubusercontent.com/cylonchau/ops-box/main/main.sh | bash -s -- global-speedtest speedtest country Nigeria
+  ```
+
 ## update_linode_fw.py
 
 * **Sync Firewall**
