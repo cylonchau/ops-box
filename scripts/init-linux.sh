@@ -496,23 +496,83 @@ setup_disk_lvm() {
 auto_format_disks() {
   local PREFIX=${1:-/data}
   ensure_lvm_installed
-  echo "自动检测未挂载未格式化磁盘并挂载到 ${PREFIX}X..."
+  echo "自动检测未挂载磁盘并初始化/挂载到 ${PREFIX}X..."
   local index=1
   for dev in $(lsblk -dpno NAME,TYPE | grep disk | awk '{print $1}'); do
-    local mountpoint=$(lsblk -no MOUNTPOINT ${dev} || true)
-    local fstype=$(lsblk -no FSTYPE ${dev} || true)
-    if [ -z "$mountpoint" ] && [ -z "$fstype" ]; then
-      echo "格式化 $dev 为 xfs，并挂载到 ${PREFIX}${index}"
-      parted -s $dev mklabel gpt mkpart primary 0% 100%
-      local part="${dev}1"
-      [ -b "${dev}p1" ] && part="${dev}p1"
-      pvcreate ${part}
-      vgcreate vg_data${index} ${part}
-      lvcreate -l 100%FREE -n lv_data${index} vg_data${index}
-      mkfs.xfs /dev/vg_data${index}/lv_data${index}
-      mkdir -p ${PREFIX}${index}
-      echo "/dev/vg_data${index}/lv_data${index} ${PREFIX}${index} xfs defaults 0 0" >> /etc/fstab
-      mount ${PREFIX}${index}
+    # 过滤掉有任何挂载点的磁盘（包含系统根盘和已挂载的数据盘）
+    local mounted_count=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -v '^$' | wc -l)
+    if [ "$mounted_count" -eq 0 ]; then
+      local vg_name="vg_data${index}"
+      local lv_name="lv_data${index}"
+
+      # 如果该磁盘关联了已有 VG，直接使用已有 VG 名字
+      local existing_vg=$(pvs --noheadings -o vg_name "$dev" "${dev}1" "${dev}p1" 2>/dev/null | awk '{print $1}' | grep -v '^$' | head -n1 || true)
+      if [ -n "$existing_vg" ]; then
+        vg_name="$existing_vg"
+      fi
+
+      # 避免挂载点或 VG 命名冲突
+      while grep -q "${PREFIX}${index}" /etc/fstab 2>/dev/null && [ -z "$existing_vg" ]; do
+        ((index++))
+        vg_name="vg_data${index}"
+        lv_name="lv_data${index}"
+      done
+
+      local lv_path="/dev/${vg_name}/${lv_name}"
+      [ -b "/dev/mapper/${vg_name}-${lv_name}" ] && lv_path="/dev/mapper/${vg_name}-${lv_name}"
+      local mount_dir="${PREFIX}${index}"
+
+      echo "[INFO] 发现待处理磁盘 $dev -> 挂载点目标: $mount_dir (VG: $vg_name)"
+
+      # 1. 检查 LV 是否已存在（断点续传/二次执行）
+      if [ -b "$lv_path" ] || lvs "$lv_path" &>/dev/null; then
+        echo "[INFO] 检测到已存在逻辑卷 $lv_path，跳过分区及 LVM 创建步骤"
+      else
+        local part="${dev}1"
+        if ! lsblk -no NAME "$dev" 2>/dev/null | grep -qE "${dev##*/}1|${dev##*/}p1"; then
+          echo "[INFO] 为 $dev 创建 GPT 分区表..."
+          parted -s "$dev" mklabel gpt mkpart primary 0% 100% || true
+          sleep 1
+        fi
+        [ -b "${dev}p1" ] && part="${dev}p1"
+
+        if ! pvs "$part" &>/dev/null; then
+          echo "[INFO] 创建 LVM 物理卷 (PV): $part"
+          pvcreate -ff -y "$part" || true
+        fi
+
+        if ! vgs "$vg_name" &>/dev/null; then
+          echo "[INFO] 创建 LVM 卷组 (VG): $vg_name"
+          vgcreate "$vg_name" "$part" || true
+        fi
+
+        if ! lvs "$lv_path" &>/dev/null; then
+          echo "[INFO] 创建 LVM 逻辑卷 (LV): $lv_name"
+          lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
+        fi
+      fi
+
+      # 2. 格式化逻辑卷（若之前因缺失 mkfs.xfs 导致格式化中断，此处将补做格式化）
+      local lv_fstype=$(lsblk -no FSTYPE "$lv_path" 2>/dev/null | grep -v '^$' | head -n1 || true)
+      if [ -z "$lv_fstype" ]; then
+        echo "[INFO] 格式化逻辑卷 $lv_path 为 XFS 文件系统..."
+        mkfs.xfs -f "$lv_path"
+      else
+        echo "[INFO] 逻辑卷 $lv_path 已存在文件系统: $lv_fstype"
+      fi
+
+      # 3. 配置 /etc/fstab 自动挂载
+      mkdir -p "$mount_dir"
+      if ! grep -q "$mount_dir" /etc/fstab; then
+        echo "$lv_path $mount_dir xfs defaults 0 0" >> /etc/fstab
+        echo "[INFO] 已添加自动挂载项到 /etc/fstab: $lv_path -> $mount_dir"
+      fi
+
+      # 4. 执行挂载
+      echo "[INFO] 正在挂载 $mount_dir..."
+      mount "$mount_dir" 2>/dev/null || mount -a || true
+      echo "[SUCCESS] $dev 已成功初始化并挂载至 $mount_dir"
+
       ((index++))
     fi
   done
