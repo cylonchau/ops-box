@@ -47,6 +47,25 @@ Commands:
 EOF
 }
 
+detect_cloud() {
+  IS_CLOUD=0
+  IS_TENCENT_CLOUD=0
+
+  # Detect Tencent Cloud environment
+  if [ -f /etc/systemd/system/tat_agent.service ] || [ -d /usr/local/qcloud ] || [ -f /usr/sbin/tat_agent ] || \
+     ( [ -f /sys/class/dmi/id/sys_vendor ] && grep -qi "tencent" /sys/class/dmi/id/sys_vendor 2>/dev/null ) || \
+     ( [ -f /sys/class/dmi/id/product_name ] && grep -qi "tencent" /sys/class/dmi/id/product_name 2>/dev/null ); then
+    IS_TENCENT_CLOUD=1
+    IS_CLOUD=1
+    echo "[INFO] Detected Tencent Cloud (CVM) environment."
+  # Detect general cloud / VPS / hypervisor environment
+  elif [ -d /var/lib/cloud ] || command -v cloud-init >/dev/null 2>&1 || \
+       ( [ -f /sys/class/dmi/id/sys_vendor ] && grep -qiE "alibaba|amazon|google|microsoft|huawei|qemu|kvm|xen" /sys/class/dmi/id/sys_vendor 2>/dev/null ); then
+    IS_CLOUD=1
+    echo "[INFO] Detected Cloud / VPS environment."
+  fi
+}
+
 detect_os() {
   if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -72,6 +91,8 @@ detect_os() {
     echo "[ERROR] /etc/os-release not found"
     exit $UNKOWNRELEASE
   fi
+
+  detect_cloud
 }
 
 countdown() {
@@ -180,28 +201,25 @@ EOF
 clean_self_start() {
   echo -e "\033[41;05m Start clean self start! \033[0m"
   sleep 1
-  case "${SYSTEM_RELEASE}" in
-    debian|ubuntu)
-      for n in $(systemctl list-unit-files --type=service | grep enabled | awk '{print $1}' | grep -Ev "autovt|getty|ssh|crond|rsyslog|network|timesyncd|hwclock"); do
-        systemctl disable "$n" || true
-        if [ "$OPERATION" != "vps" ]; then
-          systemctl stop "$n" || true
-        fi
-      done
-      ;;
-    centos|rocky|almalinux|redhat)
-      local pattern="autovt|getty|sshd|crond|rsyslog|network"
-      if [ "$OPERATION" = "vps" ]; then
-        pattern="autovt|getty|sshd|crond|rsyslog|network|cloud-config|cloud-final|cloud-init"
-      fi
-      for n in $(systemctl list-unit-files --type=service | grep enabled | awk '{print $1}' | grep -Ev "$pattern"); do
-        systemctl disable "$n" || true
-        if [ "$OPERATION" != "vps" ]; then
-          systemctl stop "$n" || true
-        fi
-      done
-      ;;
-  esac
+
+  # Base protected services (SSH, time sync, cron, power management, security, networking)
+  local protected_pattern="autovt|getty|ssh|sshd|cron|crond|rsyslog|network|Networking|timesyncd|chrony|chronyd|hwclock|acpid|apparmor|selinux|dbus|systemd-resolved|systemd-networkd|systemd-logind"
+
+  # Protect cloud provider agents & cloud-init if cloud or VPS environment is detected
+  if [ "$IS_CLOUD" -eq 1 ] || [ "$OPERATION" = "vps" ] || command -v cloud-init >/dev/null 2>&1 || [ -d /var/lib/cloud ]; then
+    protected_pattern="${protected_pattern}|cloud-init|cloud-config|cloud-final|cloud-init-local"
+    protected_pattern="${protected_pattern}|tat_agent|barad_agent|sgagent|Yunjing|aliyun|aegis|qemu-guest-agent"
+  fi
+
+  echo "[INFO] Filtering self-start services with protected pattern: ${protected_pattern}"
+
+  for n in $(systemctl list-unit-files --type=service | grep enabled | awk '{print $1}' | grep -Ev "${protected_pattern}"); do
+    echo "[INFO] Disabling non-essential service: $n"
+    systemctl disable "$n" 2>/dev/null || true
+    if [ "$OPERATION" != "vps" ]; then
+      systemctl stop "$n" 2>/dev/null || true
+    fi
+  done
 }
 
 disable_selinux() {
@@ -225,9 +243,9 @@ disable_selinux() {
   
   # Also stop firewalls
   if [ "$OS_FAMILY" = "rhel" ]; then
-    systemctl disable --now firewalld || true
+    systemctl disable --now firewalld 2>/dev/null || true
   elif [ "$OS_FAMILY" = "debian" ]; then
-    systemctl disable --now ufw || true
+    systemctl disable --now ufw 2>/dev/null || true
   fi
 }
 
