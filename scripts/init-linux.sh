@@ -436,6 +436,11 @@ ensure_lvm_installed() {
       }
     fi
   fi
+
+  # Activate all LVM volume groups and refresh devtmpfs nodes
+  vgchange -ay 2>/dev/null || true
+  vgmknodes 2>/dev/null || true
+  udevadm settle 2>/dev/null || true
 }
 
 setup_disk_lvm() {
@@ -518,41 +523,62 @@ auto_format_disks() {
         lv_name="lv_data${index}"
       done
 
-      local lv_path="/dev/${vg_name}/${lv_name}"
-      [ -b "/dev/mapper/${vg_name}-${lv_name}" ] && lv_path="/dev/mapper/${vg_name}-${lv_name}"
-      local mount_dir="${PREFIX}${index}"
+      # 显式激活 VG，防止逻辑卷处于 Inactive 状态
+      vgchange -ay "$vg_name" 2>/dev/null || true
+      vgmknodes 2>/dev/null || true
+      udevadm settle 2>/dev/null || true
 
+      local mount_dir="${PREFIX}${index}"
       echo "[INFO] 发现待处理磁盘 $dev -> 挂载点目标: $mount_dir (VG: $vg_name)"
 
-      # 1. 检查 LV 是否已存在（断点续传/二次执行）
-      if [ -b "$lv_path" ] || lvs "$lv_path" &>/dev/null; then
-        echo "[INFO] 检测到已存在逻辑卷 $lv_path，跳过分区及 LVM 创建步骤"
-      else
-        local part="${dev}1"
-        if ! lsblk -no NAME "$dev" 2>/dev/null | grep -qE "${dev##*/}1|${dev##*/}p1"; then
-          echo "[INFO] 为 $dev 创建 GPT 分区表..."
-          parted -s "$dev" mklabel gpt mkpart primary 0% 100% || true
-          sleep 1
-        fi
-        [ -b "${dev}p1" ] && part="${dev}p1"
+      local part="${dev}1"
+      if ! lsblk -no NAME "$dev" 2>/dev/null | grep -qE "${dev##*/}1|${dev##*/}p1"; then
+        echo "[INFO] 为 $dev 创建 GPT 分区表..."
+        parted -s "$dev" mklabel gpt mkpart primary 0% 100% || true
+        sleep 1
+      fi
+      [ -b "${dev}p1" ] && part="${dev}p1"
 
-        if ! pvs "$part" &>/dev/null; then
-          echo "[INFO] 创建 LVM 物理卷 (PV): $part"
-          pvcreate -ff -y "$part" || true
-        fi
-
-        if ! vgs "$vg_name" &>/dev/null; then
-          echo "[INFO] 创建 LVM 卷组 (VG): $vg_name"
-          vgcreate "$vg_name" "$part" || true
-        fi
-
-        if ! lvs "$lv_path" &>/dev/null; then
-          echo "[INFO] 创建 LVM 逻辑卷 (LV): $lv_name"
-          lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
-        fi
+      if ! pvs "$part" &>/dev/null; then
+        echo "[INFO] 创建 LVM 物理卷 (PV): $part"
+        pvcreate -ff -y "$part" || true
       fi
 
-      # 2. 格式化逻辑卷（若之前因缺失 mkfs.xfs 导致格式化中断，此处将补做格式化）
+      if ! vgs "$vg_name" &>/dev/null; then
+        echo "[INFO] 创建 LVM 卷组 (VG): $vg_name"
+        vgcreate "$vg_name" "$part" || true
+      fi
+
+      # 再次确保 VG 已激活
+      vgchange -ay "$vg_name" 2>/dev/null || true
+
+      if ! lvs "$vg_name/$lv_name" &>/dev/null && ! lvs "$vg_name" 2>/dev/null | grep -q "$lv_name"; then
+        echo "[INFO] 创建 LVM 逻辑卷 (LV): $lv_name"
+        lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
+      else
+        echo "[INFO] 检测到已存在逻辑卷 $vg_name/$lv_name"
+      fi
+
+      vgchange -ay "$vg_name" 2>/dev/null || true
+      vgmknodes 2>/dev/null || true
+      udevadm settle 2>/dev/null || true
+
+      # 动态获取活跃的逻辑卷块设备路径
+      local lv_path=""
+      if [ -b "/dev/${vg_name}/${lv_name}" ]; then
+        lv_path="/dev/${vg_name}/${lv_name}"
+      elif [ -b "/dev/mapper/${vg_name}-${lv_name}" ]; then
+        lv_path="/dev/mapper/${vg_name}-${lv_name}"
+      elif [ -b "/dev/mapper/${vg_name}--${lv_name}" ]; then
+        lv_path="/dev/mapper/${vg_name}--${lv_name}"
+      fi
+
+      if [ -z "$lv_path" ] || [ ! -b "$lv_path" ]; then
+        echo "[ERROR] 无法找到活跃的逻辑卷块设备节点: /dev/${vg_name}/${lv_name}"
+        exit 1
+      fi
+
+      # 2. 格式化逻辑卷（若未格式化，补做格式化）
       local lv_fstype=$(lsblk -no FSTYPE "$lv_path" 2>/dev/null | grep -v '^$' | head -n1 || true)
       if [ -z "$lv_fstype" ]; then
         echo "[INFO] 格式化逻辑卷 $lv_path 为 XFS 文件系统..."
