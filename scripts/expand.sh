@@ -28,9 +28,9 @@ EOF
 }
 
 ensure_lvm_installed() {
-  if ! command -v lvs &> /dev/null; then
-    echo "lvs 命令不存在，正在安装 lvm2..."
-    dnf install -y lvm2
+  if ! command -v lvs &> /dev/null || ! command -v mkfs.xfs &> /dev/null; then
+    echo "正在安装 lvm2, xfsprogs, e2fsprogs, parted 工具..."
+    dnf install -y lvm2 xfsprogs e2fsprogs parted
   fi
 }
 # Clean DNF cache

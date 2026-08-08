@@ -155,24 +155,26 @@ configure_mirrors_and_pkgs() {
         [ -f /etc/apt/sources.list ] && [ ! -f /etc/apt/sources.list.bak ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak
         
         if [ "${SYSTEM_RELEASE}" = "debian" ]; then
-          cat > /etc/apt/sources.list << EOF
-deb http://mirrors.aliyun.com/debian/ bullseye main non-free contrib
-deb-src http://mirrors.aliyun.com/debian/ bullseye main non-free contrib
-deb http://mirrors.aliyun.com/debian-security/ bullseye-security main
-deb-src http://mirrors.aliyun.com/debian-security/ bullseye-security main
-deb http://mirrors.aliyun.com/debian/ bullseye-updates main non-free contrib
-deb-src http://mirrors.aliyun.com/debian/ bullseye-updates main non-free contrib
-deb http://mirrors.aliyun.com/debian/ bullseye-backports main non-free contrib
-deb-src http://mirrors.aliyun.com/debian/ bullseye-backports main non-free contrib
-EOF
+          if [ -f /etc/apt/sources.list ]; then
+            sed -i 's|http://.*deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list
+            sed -i 's|http://.*security.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list
+          fi
+          if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+            sed -i 's|http://.*deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+            sed -i 's|http://.*security.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+          fi
         else
           # Ubuntu Aliyun mirror replacement
           sed -i 's|http://.*archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list
           sed -i 's|http://.*security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sed -i 's|http://.*archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/ubuntu.sources
+            sed -i 's|http://.*security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/ubuntu.sources
+          fi
         fi
         apt-get update -y || true
         
-        local PACKAGELIST=(lrzsz bash-completion curl apt-transport-https ca-certificates gnupg2 vim software-properties-common)
+        local PACKAGELIST=(lrzsz bash-completion curl apt-transport-https ca-certificates gnupg2 vim software-properties-common xfsprogs e2fsprogs lvm2 parted)
         for n in "${PACKAGELIST[@]}"; do
           dpkg -l "${n}" | grep -q "${n}" || apt-get install -y "${n}" || true
         done
@@ -416,11 +418,11 @@ init_system_module() {
 }
 
 ensure_lvm_installed() {
-  if ! command -v lvs &>/dev/null || ! command -v parted &>/dev/null; then
-    echo "[INFO] Installing lvm2 and parted..."
+  if ! command -v lvs &>/dev/null || ! command -v parted &>/dev/null || ! command -v mkfs.xfs &>/dev/null || ! command -v mkfs.ext4 &>/dev/null; then
+    echo "[INFO] Installing lvm2, parted, xfsprogs, and e2fsprogs..."
     if [ "$OS_FAMILY" = "rhel" ]; then
-      $PKG_MGR install -y lvm2 parted || {
-        echo "[ERROR] Failed to install lvm2 or parted"
+      $PKG_MGR install -y lvm2 parted xfsprogs e2fsprogs || {
+        echo "[ERROR] Failed to install lvm2, parted, xfsprogs or e2fsprogs"
         exit 1
       }
     elif [ "$OS_FAMILY" = "debian" ]; then
@@ -428,8 +430,8 @@ ensure_lvm_installed() {
         echo "[ERROR] Failed to update package sources"
         exit 1
       }
-      $PKG_MGR install -y lvm2 parted || {
-        echo "[ERROR] Failed to install lvm2 or parted"
+      $PKG_MGR install -y lvm2 parted xfsprogs e2fsprogs || {
+        echo "[ERROR] Failed to install lvm2, parted, xfsprogs or e2fsprogs"
         exit 1
       }
     fi
@@ -446,6 +448,8 @@ setup_disk_lvm() {
     echo "Usage: init-linux.sh disk <disk_name_e.g_sdb> <mount_directory_e.g_/data> [filesystem_type_xfs_or_ext4]"
     exit 1
   fi
+
+  ensure_lvm_installed
 
   echo "[INFO] Formatting disk /dev/$DISK as LVM mounted to $MOUNTDIR ($FSTYPE)..."
   echo "[INFO] Available disks:"
@@ -478,7 +482,6 @@ setup_disk_lvm() {
   PARTITION="${DEV}1"
   [ -b "${DEV}p1" ] && PARTITION="${DEV}p1"
 
-  ensure_lvm_installed
   pvcreate "$PARTITION" || true
   vgcreate vg_data "$PARTITION" || true
   lvcreate -l 100%FREE -n lv_data vg_data || true
