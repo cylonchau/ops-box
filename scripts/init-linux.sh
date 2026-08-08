@@ -505,106 +505,157 @@ setup_disk_lvm() {
 auto_format_disks() {
   local PREFIX=${1:-/data}
   ensure_lvm_installed
-  echo "自动检测未挂载磁盘并初始化/挂载到 ${PREFIX}X..."
-  local index=1
+  echo "自动检测未挂载磁盘并初始化/挂载..."
+
+  # 1. 检索所有未挂载的空闲磁盘
+  local unmounted_disks=()
   for dev in $(lsblk -dpno NAME,TYPE | grep disk | awk '{print $1}'); do
-    # 过滤掉有任何挂载点的磁盘（包含系统根盘和已挂载的数据盘）
     local mounted_count=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -v '^$' | wc -l)
     if [ "$mounted_count" -eq 0 ]; then
-      local vg_name="vg_data${index}"
-      local lv_name="lv_data${index}"
+      unmounted_disks+=("$dev")
+    fi
+  done
 
-      # 如果该磁盘关联了已有 VG，直接使用已有 VG 名字
-      local existing_vg=$(pvs --noheadings -o vg_name "$dev" "${dev}1" "${dev}p1" 2>/dev/null | awk '{print $1}' | grep -v '^$' | head -n1 || true)
-      if [ -n "$existing_vg" ]; then
-        vg_name="$existing_vg"
+  local total_disks=${#unmounted_disks[@]}
+  if [ "$total_disks" -eq 0 ]; then
+    echo "[INFO] 未找到未挂载的数据磁盘。"
+    return 0
+  fi
+
+  echo "[INFO] 检测到 $total_disks 块未挂载的数据磁盘: ${unmounted_disks[*]}"
+
+  local index=1
+  for dev in "${unmounted_disks[@]}"; do
+    local vg_name="vg_data"
+    local lv_name="lv_data"
+    local mount_dir="${PREFIX}"
+
+    # 多块磁盘时才区分数字后缀 (/data1, /data2 ...)
+    if [ "$total_disks" -gt 1 ]; then
+      vg_name="vg_data${index}"
+      lv_name="lv_data${index}"
+      mount_dir="${PREFIX}${index}"
+    else
+      # 单块磁盘时，若 /data 目录已记录在 fstab 中，避让使用 /data1
+      if grep -qE "${PREFIX}[[:space:]]" /etc/fstab 2>/dev/null; then
+        vg_name="vg_data1"
+        lv_name="lv_data1"
+        mount_dir="${PREFIX}1"
       fi
+    fi
 
-      # 避免挂载点或 VG 命名冲突
-      while grep -q "${PREFIX}${index}" /etc/fstab 2>/dev/null && [ -z "$existing_vg" ]; do
-        ((index++))
-        vg_name="vg_data${index}"
-        lv_name="lv_data${index}"
-      done
-
-      # 显式激活 VG，防止逻辑卷处于 Inactive 状态
-      vgchange -ay "$vg_name" 2>/dev/null || true
-      vgmknodes 2>/dev/null || true
-      udevadm settle 2>/dev/null || true
-
-      local mount_dir="${PREFIX}${index}"
-      echo "[INFO] 发现待处理磁盘 $dev -> 挂载点目标: $mount_dir (VG: $vg_name)"
-
-      local part="${dev}1"
-      if ! lsblk -no NAME "$dev" 2>/dev/null | grep -qE "${dev##*/}1|${dev##*/}p1"; then
-        echo "[INFO] 为 $dev 创建 GPT 分区表..."
-        parted -s "$dev" mklabel gpt mkpart primary 0% 100% || true
-        sleep 1
-      fi
-      [ -b "${dev}p1" ] && part="${dev}p1"
-
-      if ! pvs "$part" &>/dev/null; then
-        echo "[INFO] 创建 LVM 物理卷 (PV): $part"
-        pvcreate -ff -y "$part" || true
-      fi
-
-      if ! vgs "$vg_name" &>/dev/null; then
-        echo "[INFO] 创建 LVM 卷组 (VG): $vg_name"
-        vgcreate "$vg_name" "$part" || true
-      fi
-
-      # 再次确保 VG 已激活
-      vgchange -ay "$vg_name" 2>/dev/null || true
-
-      if ! lvs "$vg_name/$lv_name" &>/dev/null && ! lvs "$vg_name" 2>/dev/null | grep -q "$lv_name"; then
-        echo "[INFO] 创建 LVM 逻辑卷 (LV): $lv_name"
-        lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
+    # 如果磁盘关联了已有 VG，继承已有 VG 名称
+    local existing_vg=$(pvs --noheadings -o vg_name "$dev" "${dev}1" "${dev}p1" 2>/dev/null | awk '{print $1}' | grep -v '^$' | head -n1 || true)
+    if [ -n "$existing_vg" ]; then
+      vg_name="$existing_vg"
+      if [ "$vg_name" = "vg_data" ]; then
+        lv_name="lv_data"
       else
-        echo "[INFO] 检测到已存在逻辑卷 $vg_name/$lv_name"
+        lv_name="lv_data${vg_name#vg_data}"
       fi
+    fi
 
+    echo "[INFO] 处理磁盘 $dev -> 挂载点: $mount_dir (VG: $vg_name, LV: $lv_name)"
+
+    modprobe dm_mod 2>/dev/null || true
+    vgchange -ay "$vg_name" 2>/dev/null || true
+    vgmknodes 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    # 1. 检查或创建 GPT 分区表
+    local part="${dev}1"
+    if ! lsblk -no NAME "$dev" 2>/dev/null | grep -qE "${dev##*/}1|${dev##*/}p1"; then
+      echo "[INFO] 为 $dev 创建 GPT 分区表..."
+      parted -s "$dev" mklabel gpt mkpart primary 0% 100% || true
+      sleep 1
+    fi
+    [ -b "${dev}p1" ] && part="${dev}p1"
+
+    # 2. 检查或创建 PV
+    if ! pvs "$part" &>/dev/null; then
+      echo "[INFO] 创建 LVM 物理卷 (PV): $part"
+      pvcreate -ff -y "$part" || true
+    fi
+
+    # 3. 检查或创建 VG
+    if ! vgs "$vg_name" &>/dev/null; then
+      echo "[INFO] 创建 LVM 卷组 (VG): $vg_name"
+      vgcreate "$vg_name" "$part" || true
+    fi
+
+    vgchange -ay "$vg_name" 2>/dev/null || true
+
+    # 4. 检查或创建 LV
+    if ! lvs "$vg_name/$lv_name" &>/dev/null && ! lvs "$vg_name" 2>/dev/null | grep -q "$lv_name"; then
+      echo "[INFO] 创建 LVM 逻辑卷 (LV): $lv_name"
+      lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
+    else
+      echo "[INFO] 检测到已存在逻辑卷 $vg_name/$lv_name"
+    fi
+
+    # 刷新设备节点
+    vgchange -ay "$vg_name" 2>/dev/null || true
+    vgmknodes 2>/dev/null || true
+    dmsetup mknodes 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    # 获取块设备节点路径
+    local lv_path=""
+    if [ -b "/dev/${vg_name}/${lv_name}" ]; then
+      lv_path="/dev/${vg_name}/${lv_name}"
+    elif [ -b "/dev/mapper/${vg_name}-${lv_name}" ]; then
+      lv_path="/dev/mapper/${vg_name}-${lv_name}"
+    elif [ -b "/dev/mapper/${vg_name}--${lv_name}" ]; then
+      lv_path="/dev/mapper/${vg_name}--${lv_name}"
+    fi
+
+    # 若无法获取有效块设备（先前执行中断留下的损坏元数据），自动清理重建
+    if [ -z "$lv_path" ] || [ ! -b "$lv_path" ]; then
+      echo "[WARN] 无法访问逻辑卷节点 /dev/${vg_name}/${lv_name}，正清理重建该磁盘 LVM..."
+      lvremove -f "$vg_name/$lv_name" 2>/dev/null || true
+      vgremove -f "$vg_name" 2>/dev/null || true
+      pvremove -f "$part" 2>/dev/null || true
+      pvcreate -ff -y "$part" || true
+      vgcreate "$vg_name" "$part" || true
+      lvcreate -l 100%FREE -n "$lv_name" "$vg_name" || true
       vgchange -ay "$vg_name" 2>/dev/null || true
       vgmknodes 2>/dev/null || true
       udevadm settle 2>/dev/null || true
 
-      # 动态获取活跃的逻辑卷块设备路径
-      local lv_path=""
       if [ -b "/dev/${vg_name}/${lv_name}" ]; then
         lv_path="/dev/${vg_name}/${lv_name}"
       elif [ -b "/dev/mapper/${vg_name}-${lv_name}" ]; then
         lv_path="/dev/mapper/${vg_name}-${lv_name}"
-      elif [ -b "/dev/mapper/${vg_name}--${lv_name}" ]; then
-        lv_path="/dev/mapper/${vg_name}--${lv_name}"
       fi
-
-      if [ -z "$lv_path" ] || [ ! -b "$lv_path" ]; then
-        echo "[ERROR] 无法找到活跃的逻辑卷块设备节点: /dev/${vg_name}/${lv_name}"
-        exit 1
-      fi
-
-      # 2. 格式化逻辑卷（若未格式化，补做格式化）
-      local lv_fstype=$(lsblk -no FSTYPE "$lv_path" 2>/dev/null | grep -v '^$' | head -n1 || true)
-      if [ -z "$lv_fstype" ]; then
-        echo "[INFO] 格式化逻辑卷 $lv_path 为 XFS 文件系统..."
-        mkfs.xfs -f "$lv_path"
-      else
-        echo "[INFO] 逻辑卷 $lv_path 已存在文件系统: $lv_fstype"
-      fi
-
-      # 3. 配置 /etc/fstab 自动挂载
-      mkdir -p "$mount_dir"
-      if ! grep -q "$mount_dir" /etc/fstab; then
-        echo "$lv_path $mount_dir xfs defaults 0 0" >> /etc/fstab
-        echo "[INFO] 已添加自动挂载项到 /etc/fstab: $lv_path -> $mount_dir"
-      fi
-
-      # 4. 执行挂载
-      echo "[INFO] 正在挂载 $mount_dir..."
-      mount "$mount_dir" 2>/dev/null || mount -a || true
-      echo "[SUCCESS] $dev 已成功初始化并挂载至 $mount_dir"
-
-      ((index++))
     fi
+
+    if [ -z "$lv_path" ] || [ ! -b "$lv_path" ]; then
+      echo "[ERROR] 无法创建或激活逻辑卷块设备节点: /dev/${vg_name}/${lv_name}"
+      exit 1
+    fi
+
+    # 5. 格式化逻辑卷
+    local lv_fstype=$(lsblk -no FSTYPE "$lv_path" 2>/dev/null | grep -v '^$' | head -n1 || true)
+    if [ -z "$lv_fstype" ]; then
+      echo "[INFO] 格式化逻辑卷 $lv_path 为 XFS 文件系统..."
+      mkfs.xfs -f "$lv_path"
+    else
+      echo "[INFO] 逻辑卷 $lv_path 已存在文件系统: $lv_fstype"
+    fi
+
+    # 6. 配置 /etc/fstab 并挂载
+    mkdir -p "$mount_dir"
+    if ! grep -q "$mount_dir" /etc/fstab; then
+      echo "$lv_path $mount_dir xfs defaults 0 0" >> /etc/fstab
+      echo "[INFO] 已添加自动挂载项到 /etc/fstab: $lv_path -> $mount_dir"
+    fi
+
+    echo "[INFO] 正在挂载 $mount_dir..."
+    mount "$mount_dir" 2>/dev/null || mount -a || true
+    echo "[SUCCESS] $dev 已成功初始化并挂载至 $mount_dir"
+
+    ((index++))
   done
 }
 
