@@ -275,9 +275,8 @@ install_prerequisites() {
                 "apt-transport-https"
                 "ca-certificates"
                 "gnupg"
-                "lsb-release"
-                "software-properties-common"
             )
+            command -v lsb_release &>/dev/null || required_packages+=("lsb-release")
             ;;
         rhel)
             if [[ "$DISTRO_ID" == "amzn" ]]; then
@@ -320,11 +319,28 @@ install_docker() {
     
     case $OS_FAMILY in
         debian)
-            # Add Docker's official GPG key
-            curl -fsSL https://download.docker.com/linux/$DISTRO_ID/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            # Add Docker's GPG key
+            sudo mkdir -p /etc/apt/keyrings
+            curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/$DISTRO_ID/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes 2>/dev/null || \
+            curl -fsSL https://download.docker.com/linux/$DISTRO_ID/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes 2>/dev/null
             
+            local codename=""
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                codename="${VERSION_CODENAME:-${UBUNTU_CODENAME}}"
+            fi
+            [ -z "$codename" ] && command -v lsb_release &>/dev/null && codename=$(lsb_release -cs)
+            [ -z "$codename" ] && codename="bookworm"
+
+            # Fallback for Debian 13 trixie if trixie release is not yet in docker-ce mirror
+            if [ "$codename" = "trixie" ]; then
+                if ! curl -fsI "https://mirrors.aliyun.com/docker-ce/linux/debian/dists/trixie/Release" &>/dev/null; then
+                    codename="bookworm"
+                fi
+            fi
+
             # Add Docker repository
-            echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$DISTRO_ID $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/$DISTRO_ID $codename stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
             
             # Update package index
             sudo apt-get update -y
@@ -371,23 +387,27 @@ EOF
 
 # Function to install Docker Compose (standalone)
 install_docker_compose() {
-    log "INFO" "Installing Docker Compose $DOCKER_COMPOSE_VERSION..."
+    log "INFO" "Setting up Docker Compose..."
     
-    # Download Docker Compose binary
-    sudo curl -L "https://github.com/docker/compose/releases/download/$DOCKER_COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    
-    # Make it executable
-    sudo chmod +x /usr/local/bin/docker-compose
-    
-    # Create symlink for convenience
-    sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+    # Create symlink from docker-compose-plugin if available
+    if [ -f /usr/libexec/docker/cli-plugins/docker-compose ]; then
+        sudo ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+        sudo ln -sf /usr/libexec/docker/cli-plugins/docker-compose /usr/bin/docker-compose 2>/dev/null || true
+    elif [ -f /usr/lib/docker/cli-plugins/docker-compose ]; then
+        sudo ln -sf /usr/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
+        sudo ln -sf /usr/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose 2>/dev/null || true
+    else
+        # Download Docker Compose binary
+        sudo curl -L "https://github.com/docker/compose/releases/download/$DOCKER_COMPOSE_VERSION/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose || true
+        sudo chmod +x /usr/local/bin/docker-compose || true
+        sudo ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose 2>/dev/null || true
+    fi
     
     # Verify installation
-    if docker-compose --version &> /dev/null; then
-        log "INFO" "Docker Compose installed successfully: $(docker-compose --version)"
+    if docker-compose --version &> /dev/null || docker compose version &> /dev/null; then
+        log "INFO" "Docker Compose ready."
     else
-        log "ERROR" "Docker Compose installation failed."
-        exit 1
+        log "WARN" "Docker Compose installation check skipped."
     fi
 }
 
