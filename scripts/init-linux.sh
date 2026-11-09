@@ -718,16 +718,25 @@ expand_root_lvm() {
     fi
   fi
 
-  local ROOT_DEV=$(df / | awk 'NR==2 {print $1}')
+  local ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || df / | awk 'NR==2 {print $1}')
   if [ -z "$ROOT_DEV" ]; then
     echo "[ERROR] Unable to detect root device"
     exit 1
   fi
 
-  local LV_PATH=$(lvs --noheadings -o lv_path | grep -E "$ROOT_DEV|/" || true)
+  # 使用 /dev/mapper 路径直接查询 LV，避免 lvs 无法识别 /dev/<vg>/<lv> 之外的路径
+  local LV_PATH=$(lvs --noheadings -o lv_path "$ROOT_DEV" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+  if [ -z "$LV_PATH" ]; then
+    # 回退：根据 mapper 名称匹配 (vg-lv)
+    local MAP_NAME=$(basename "$ROOT_DEV")
+    LV_PATH=$(lvs --noheadings -o lv_path,lv_dm_path 2>/dev/null | awk -v m="/dev/mapper/$MAP_NAME" '$2==m {print $1; exit}' || true)
+  fi
   [ -z "$LV_PATH" ] && LV_PATH="$ROOT_DEV"
-  local VG_NAME=$(lvs "$LV_PATH" -o vg_name --noheadings | awk '{print $1}' || true)
-  local PV_NAME=$(pvs --noheadings -o pv_name | grep -E 'sd|nvme|vd' | head -n1 || true)
+  local VG_NAME=$(lvs --noheadings -o vg_name "$LV_PATH" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+  local PV_NAME=""
+  if [ -n "$VG_NAME" ]; then
+    PV_NAME=$(pvs --noheadings -o pv_name --select "vg_name=$VG_NAME" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+  fi
 
   if [ -z "$VG_NAME" ] || [ -z "$PV_NAME" ]; then
     echo "[ERROR] Unable to identify VG or PV for expansion"
